@@ -1,0 +1,179 @@
+post_install() {
+  local pkgver="5.0.0"
+  local pkgrel="1"
+  local framework_module="/usr/share/issabel/module_installer/issabel-framework-${pkgver}-${pkgrel}"
+  local system_module="/usr/share/issabel/module_installer/issabel-system-${pkgver}-${pkgrel}"
+  local pbx_module="/usr/share/issabel/module_installer/issabel-pbx-${pkgver}-${pkgrel}"
+  local db_dir="/var/www/db"
+
+  if [ ! -x /usr/bin/php ] && [ -x /usr/bin/php-legacy ]; then
+    ln -s /usr/bin/php-legacy /usr/bin/php
+  fi
+
+  install -d -m 1777 /var/lib/php/session-asterisk
+  install -d -m 0777 "${db_dir}" /var/www/backup /var/www/html/var/templates_c /var/www/html/var/cache /var/www/html/cache
+  install -d /var/log/issabel /var/log/asterisk
+
+  if [ ! -e /var/www/html/db ]; then
+    ln -s /var/www/db /var/www/html/db
+  elif [ -d /var/www/html/db ] && [ ! -L /var/www/html/db ] && [ -z "$(ls -A /var/www/html/db 2>/dev/null)" ]; then
+    rmdir /var/www/html/db
+    ln -s /var/www/db /var/www/html/db
+  fi
+
+  if [ -f /etc/php/conf.d/issabel.ini ]; then
+    grep -q 'session.save_path' /etc/php/conf.d/issabel.ini || printf '\nsession.save_path = "/var/lib/php/session-asterisk"\n' >> /etc/php/conf.d/issabel.ini
+  fi
+
+  # Initialize framework DBs with upstream installer logic so ACL/history tables exist.
+  [ -d "${framework_module}/setup/db" ] && issabel-dbprocess install "${framework_module}/setup/db" || true
+  [ -f "${db_dir}/acl.db" ] && sqlite3 "${db_dir}/acl.db" "UPDATE acl_user SET md5_password='c93ccd78b2076528346216b3b2f701e6' WHERE name='admin';" >/dev/null 2>&1 || true
+  [ -f "${db_dir}/settings.db" ] && sqlite3 "${db_dir}/settings.db" "INSERT OR REPLACE INTO settings(key, value) VALUES ('issabel_version_release', '5.0.0-1'), ('issabel_version', '5.0.0'), ('theme', 'tenant'), ('activatedIssabelPBX', '1');" >/dev/null 2>&1 || true
+  [ -f "${db_dir}/menu.db" ] && sqlite3 "${db_dir}/menu.db" "DELETE FROM menu WHERE id IN ('sysinfo','load_module','example');" >/dev/null 2>&1 || true
+  [ -f "${db_dir}/acl.db" ] && sqlite3 "${db_dir}/acl.db" "DELETE FROM acl_group_permission WHERE id_resource IN (SELECT id FROM acl_resource WHERE name IN ('sysinfo','load_module','example'));" >/dev/null 2>&1 || true
+  [ -f "${db_dir}/acl.db" ] && sqlite3 "${db_dir}/acl.db" "DELETE FROM acl_resource WHERE name IN ('sysinfo','load_module','example');" >/dev/null 2>&1 || true
+
+  # Add PBX-related resources and menu entries on top of the framework DB.
+  [ -f "${db_dir}/acl.db" ] && sqlite3 "${db_dir}/acl.db" "
+    INSERT OR IGNORE INTO acl_resource (id,name,description) VALUES
+      (30,'pbxadmin','PBX'),
+      (31,'voicemail','Voicemail'),
+      (32,'monitoring','Monitoring'),
+      (33,'conference','Conference'),
+      (34,'tools','Tools'),
+      (35,'endpoints','Endpoints'),
+      (36,'extensions_batch','Extensions'),
+      (37,'qr_batch','QR Batch'),
+      (38,'asterisk_cli','Asterisk-Cli'),
+      (39,'file_editor','Asterisk File Editor'),
+      (40,'festival','Festival'),
+      (41,'recordings','Recordings');
+    INSERT OR IGNORE INTO acl_group_permission (id,id_action,id_group,id_resource) VALUES
+      (30,1,1,30),(31,1,1,31),(32,1,1,32),(33,1,1,33),(34,1,1,34),(35,1,1,35),
+      (36,1,1,36),(37,1,1,37),(38,1,1,38),(39,1,1,39),(40,1,1,40),(41,1,1,41);
+  " >/dev/null 2>&1 || true
+  [ -f "${db_dir}/menu.db" ] && sqlite3 "${db_dir}/menu.db" "
+    INSERT OR IGNORE INTO menu (id,IdParent,Link,Name,Type,order_no) VALUES
+      ('pbxconfig','','','PBX','',0),
+      ('pbxadmin','pbxconfig','/admin/','PBX Configuration','',0),
+      ('voicemail','pbxconfig','','Voicemail','module',0),
+      ('monitoring','pbxconfig','','Calls Recordings','module',0),
+      ('endpoints','pbxconfig','','Batch Configurations','',0),
+      ('extensions_batch','endpoints','','Batch of Extensions','module',0),
+      ('qr_batch','endpoints','','QR Configurations','module',0),
+      ('conference','pbxconfig','','Conference','module',0),
+      ('tools','pbxconfig','','Tools','',0),
+      ('asterisk_cli','tools','','Asterisk-Cli','module',0),
+      ('file_editor','tools','','Asterisk File Editor','module',0),
+      ('festival','tools','','Festival','module',0),
+      ('recordings','tools','','Recordings','module',0);
+  " >/dev/null 2>&1 || true
+
+  # Merge system/PBX menus and DBs.
+  [ -f "${system_module}/menu.xml" ] && issabel-menumerge "${system_module}/menu.xml" || true
+  [ -d "${system_module}/setup/db" ] && issabel-dbprocess install "${system_module}/setup/db" || true
+  [ -f "${pbx_module}/menu.xml" ] && issabel-menumerge "${pbx_module}/menu.xml" || true
+  [ -d "${pbx_module}/setup/db" ] && issabel-dbprocess install "${pbx_module}/setup/db" || true
+
+  if [ -d "${system_module}" ]; then
+    rm -rf /tmp/new_module/system
+    mkdir -p /tmp/new_module/system
+    cp -r "${system_module}/"* /tmp/new_module/system/
+    php /tmp/new_module/system/setup/installer.php || :
+  fi
+
+  if [ -d "${pbx_module}" ]; then
+    rm -rf /tmp/new_module/pbx
+    mkdir -p /tmp/new_module/pbx
+    cp -r "${pbx_module}/"* /tmp/new_module/pbx/
+    php /tmp/new_module/pbx/setup/installer.php || :
+  fi
+  rm -rf /tmp/new_module
+
+  # Create config files if packaging from an older build omitted them.
+  if [ ! -f /etc/issabelpbx.conf ]; then
+    cat > /etc/issabelpbx.conf << 'EOF'
+<?php
+$amp_conf['AMPDBUSER'] = 'asteriskuser';
+$amp_conf['AMPDBPASS'] = '385044c4053aa853e679';
+$amp_conf['AMPDBHOST'] = 'localhost';
+$amp_conf['AMPDBNAME'] = 'asterisk';
+$amp_conf['AMPDBENGINE'] = 'mysql';
+$amp_conf['datasource'] = '';
+require_once('/var/www/html/admin/bootstrap.php');
+EOF
+    chmod 644 /etc/issabelpbx.conf
+  fi
+
+  if [ ! -f /etc/amportal.conf ]; then
+    cat > /etc/amportal.conf << 'EOF'
+AMPDBHOST=localhost
+AMPDBNAME=asterisk
+AMPDBUSER=asteriskuser
+AMPDBPASS=385044c4053aa853e679
+AMPDBENGINE=mysql
+AMPENGINE=asterisk
+ASTMANAGERHOST=localhost
+ASTMANAGERPORT=5038
+ASTMANAGERPROXYPORT=0
+AMPMGRUSER=admin
+AMPMGRPASS=amp111
+AMPWEBROOT=/var/www/html
+AMPCGIBIN=/var/www/cgi-bin
+AUTHTYPE=database
+AMPEXTENSIONS=extensions
+EOF
+    chmod 644 /etc/amportal.conf
+  fi
+
+  # Create Smarty symlink
+  ln -snf /usr/share/php/Smarty /var/www/html/libs/Smarty
+
+  # Create admin symlinks for PBX GUI
+  ln -snf /var/www/html/admin/amp_conf/htdocs/admin/index.php /var/www/html/admin/index.php
+  ln -snf /var/www/html/admin/amp_conf/htdocs/admin/config.php /var/www/html/admin/config.php
+  ln -snf /var/www/html/admin/amp_conf/htdocs/admin/bootstrap.php /var/www/html/admin/bootstrap.php
+  ln -snf /var/www/html/admin/amp_conf/htdocs/admin/libraries /var/www/html/admin/libraries
+  ln -snf /var/www/html/admin/amp_conf/htdocs/admin/views /var/www/html/admin/views
+  ln -snf /var/www/html/admin/amp_conf/htdocs/admin/assets /var/www/html/admin/assets
+  ln -snf /var/www/html/admin/amp_conf/htdocs/admin/i18n /var/www/html/admin/i18n
+  ln -snf /var/www/html/admin/amp_conf/htdocs/admin/page.modules.php /var/www/html/admin/page.modules.php
+
+  # Restore default.conf.php if it was previously hacked by older revisions of this package.
+  sed -i "s#//checkFrameworkDatabases(\$arrConf\\['issabel_dbdir'\\]);#checkFrameworkDatabases(\$arrConf['issabel_dbdir']);#" /var/www/html/configs/default.conf.php 2>/dev/null || true
+  sed -i "s#\$arrConf\\['mainTheme'\\] = 'tenant'; //load_theme(\$arrConf\\['basePath'\\].\"/\");#\$arrConf['mainTheme'] = load_theme(\$arrConf['basePath'].\"/\");#" /var/www/html/configs/default.conf.php 2>/dev/null || true
+  sed -i "s#//\$arrConf\\['issabel_version'\\] = load_version_issabel(\$arrConf\\['basePath'\\].\"/\");#\$arrConf['issabel_version'] = load_version_issabel(\$arrConf['basePath'].\"/\");#" /var/www/html/configs/default.conf.php 2>/dev/null || true
+
+  # Fix PHP 8.3 count() compatibility in modules (only if not already fixed)
+  grep -q "is_array(\$result)" /var/www/html/modules/qr_batch/libs/IssabelQRConfig.class.php || sed -i 's/if(count($result)>0)/if (is_array($result) && count($result)>0)/g' /var/www/html/modules/qr_batch/libs/IssabelQRConfig.class.php 2>/dev/null || true
+  grep -q "is_array(\$result)" /var/www/html/modules/monitoring/libs/paloSantoMonitoring.class.php || sed -i 's/if (count($result) <= 0)/if (!is_array($result) || count($result) <= 0)/g' /var/www/html/modules/monitoring/libs/paloSantoMonitoring.class.php 2>/dev/null || true
+
+  if id -u asterisk >/dev/null 2>&1; then
+    chown -R asterisk:asterisk /var/lib/php/session-asterisk /var/www /var/log/issabel /var/log/asterisk /var/lib/asterisk/agi-bin /var/lib/asterisk/moh /var/www/html/admin /var/www/html/modules 2>/dev/null || true
+  fi
+  chmod 666 "${db_dir}"/*.db 2>/dev/null || true
+  chmod 666 /var/log/asterisk/issabelpbx_dbug 2>/dev/null || true
+
+  touch /var/log/asterisk/issabelpbx_dbug
+  chmod 666 /var/log/asterisk/issabelpbx_dbug
+
+  rm -rf /var/www/html/var/templates_c/*
+
+  systemctl restart httpd 2>/dev/null || true
+
+  echo "  3. Default credentials:"
+  echo "     Username: admin"
+  echo "     Password: admin1234"
+  echo ""
+  echo "  CHANGE PASSWORD IMMEDIATELY!"
+  echo ""
+  echo "  This is a BETA release. Some features may not work correctly."
+  echo ""
+}
+
+post_upgrade() {
+  post_install
+  # Fix PHP 8.3 count() compatibility in modules
+  sed -i 's/if(count($result)>0)/if (is_array($result) && count($result)>0)/g' /var/www/html/modules/qr_batch/libs/IssabelQRConfig.class.php 2>/dev/null || true
+  sed -i 's/if (count($result) <= 0)/if (!is_array($result) || count($result) <= 0)/g' /var/www/html/modules/monitoring/libs/paloSantoMonitoring.class.php 2>/dev/null || true
+}
