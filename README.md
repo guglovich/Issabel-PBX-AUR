@@ -19,11 +19,11 @@ Issabel is an open source unified communications solution based on Asterisk PBX.
 | issabel-pbx | 5.0.0 | PBX logic and AGI scripts |
 | issabelpbx | 2.12.0 | Asterisk configuration GUI |
 
-## Installation (AUR)
+## Installation
 
 ```bash
 # Install all packages
-paru -S issabel-framework issabel-system issabel-pbx issabelpbx
+makepkg -si
 ```
 
 ## Default Credentials
